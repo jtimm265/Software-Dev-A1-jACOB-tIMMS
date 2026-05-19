@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GCS - Robot Mission Control</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1e1e24;
+            color: #f5f5f5;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            color: #4caf50;
+            margin-bottom: 5px;
+        }
+
+        .container {
+            display: flex;
+            gap: 30px;
+            max-width: 1000px;
+            width: 100%;
+            margin-top: 20px;
+        }
+
+        /* Telemetry Panel Styling */
+        .panel {
+            background-color: #2a2a35;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .data-field {
+            font-size: 1.2rem;
+            border-bottom: 1px solid #3a3a4a;
+            padding-bottom: 8px;
+        }
+
+        .data-value {
+            font-weight: bold;
+            color: #00bcd4;
+            float: right;
+        }
+
+        .status-active {
+            color: #4caf50;
+        }
+
+        .status-stuck {
+            color: #f44336;
+            font-weight: bold;
+        }
+
+        /* 21x21 Grid Map Styling */
+        .map-container {
+            flex: 1.5;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(21, 20px);
+            grid-template-rows: repeat(21, 20px);
+            gap: 1px;
+            background-color: #3a3a4a;
+            border: 2px solid #4caf50;
+            padding: 2px;
+            border-radius: 4px;
+        }
+
+        .cell {
+            width: 20px;
+            height: 20px;
+            background-color: #252530;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+            .cell:hover {
+                background-color: #3d3d52;
+            }
+
+        /* The Robot's icon on the grid */
+        .robot {
+            background-color: #ff9800 !important;
+            border-radius: 50%;
+            box-shadow: 0 0 8px #ff9800;
+            position: relative;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Ground Control Station</h1>
+    <p>Click any cell on the 21x21 grid to dispatch a movement command.</p>
+
+    <div class="container">
+        <div class="panel">
+            <h2>Telemetry Stream</h2>
+            <div class="data-field">Robot ID: <span id="robot-id" class="data-value">Offline</span></div>
+            <div class="data-field">X Coordinate: <span id="pos-x" class="data-value">0</span></div>
+            <div class="data-field">Y Coordinate: <span id="pos-y" class="data-value">0</span></div>
+            <div class="data-field">Battery Level: <span id="battery" class="data-value">0%</span></div>
+            <div class="data-field">Status: <span id="status" class="data-value">Disconnected</span></div>
+        </div>
+
+        <div class="map-container">
+            <div id="grid" class="grid"></div>
+        </div>
+    </div>
+
+    <script>
+        const gridContainer = document.getElementById('grid');
+        const GRID_SIZE = 21;
+        let currentX = 0;
+        let currentY = 0;
+
+        // 1. Generate the visual 21x21 map grid dynamically
+        // Note: Map matches standard grids where (0,0) is bottom-left, so we loop rows backwards
+        for (let y = GRID_SIZE - 1; y >= 0; y--) {
+            for (let x = 0; x < GRID_SIZE; x++) {
+                const cell = document.createElement('div');
+                cell.classList.add('cell');
+                cell.dataset.x = x;
+                cell.dataset.y = y;
+                cell.title = `Coordinates: (${x}, ${y})`;
+
+                // Add click listener to send move commands
+                cell.addEventListener('click', () => sendMoveCommand(x, y));
+                gridContainer.appendChild(cell);
+            }
+        }
+
+        // 2. Connect to the WebSocket Live Telemetry Pipe
+        const ws = new WebSocket('ws://localhost:8000/ws/telemetry');
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            if (data.error) {
+                document.getElementById('status').innerText = "Signal Loss...";
+                document.getElementById('status').className = "data-value status-stuck";
+                return;
+            }
+
+            // Extract position, handling the simulation's schema nested structures gracefully
+            const posX = data.position ? data.position.x : 0;
+            const posY = data.position ? data.position.y : 0;
+
+            // Update Text Elements dynamically
+            document.getElementById('robot-id').innerText = data.id || "Unknown";
+            document.getElementById('pos-x').innerText = posX;
+            document.getElementById('pos-y').innerText = posY;
+            document.getElementById('battery').innerText = `${data.battery?.toFixed(1) || 0}%`;
+
+            const statusEl = document.getElementById('status');
+            statusEl.innerText = data.status || "IDLE";
+            statusEl.className = `data-value ${data.status === 'STUCK' ? 'status-stuck' : 'status-active'}`;
+
+            // Redraw map position marker 
+            if (posX !== currentX || posY !== currentY) {
+                updateRobotMarker(posX, posY);
+            }
+        };
+
+        ws.onclose = () => {
+            document.getElementById('status').innerText = "Disconnected Server";
+            document.getElementById('status').className = "data-value status-stuck";
+        };
+
+        // .Helper to shift the robot icon on the grid
+        function updateRobotMarker(newX, newY) {
+            // Remove previous marker
+            const oldMarker = document.querySelector('.robot');
+            if (oldMarker) oldMarker.classList.remove('robot');
+
+            // Find matching cell element and light it up
+            const newTargetCell = document.querySelector(`[data-x="${newX}"][data-y="${newY}"]`);
+            if (newTargetCell) {
+                newTargetCell.classList.add('robot');
+                currentX = newX;
+                currentY = newY;
+            }
+        }
+
+        //  Send HTTP POST Move requests on grid click
+        async function sendMoveCommand(x, y) {
+            try {
+                const response = await fetch('http://localhost:8000/command/move', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ x: x, y: y, user: "Commander" })
+                });
+
+                if (!response.ok) {
+                    console.error("Movement command rejected by core control station.");
+                }
+            } catch (err) {
+                console.error("Failed executing API post fetch request:", err);
+            }
+        }
+    </script>
+</body>
+</html>
